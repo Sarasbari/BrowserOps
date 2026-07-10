@@ -1,0 +1,268 @@
+// ═══════════════════════════════════════════════════════════
+// BrowserOps — Database Schema
+// PostgreSQL with Prisma ORM
+// ═══════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── User & Workspace ──
+
+model User {
+  id            String   @id @default(cuid())
+  clerkId       String   @unique @map("clerk_id")
+  email         String   @unique
+  name          String?
+  avatarUrl     String?  @map("avatar_url")
+  plan          Plan     @default(FREE)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  workflows     Workflow[]
+  credentials   Credential[]
+  usageRecords  UsageRecord[]
+  workspaces    WorkspaceMember[]
+
+  @@map("users")
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members   WorkspaceMember[]
+  workflows Workflow[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  role        WorkspaceRole @default(MEMBER)
+  userId      String        @map("user_id")
+  workspaceId String        @map("workspace_id")
+  joinedAt    DateTime      @default(now()) @map("joined_at")
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@map("workspace_members")
+}
+
+// ── Workflows ──
+
+model Workflow {
+  id          String         @id @default(cuid())
+  name        String
+  description String?
+  status      WorkflowStatus @default(DRAFT)
+  userId      String         @map("user_id")
+  workspaceId String?        @map("workspace_id")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace?         @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  versions    WorkflowVersion[]
+  schedules   Schedule[]
+
+  @@index([userId])
+  @@index([workspaceId])
+  @@map("workflows")
+}
+
+model WorkflowVersion {
+  id          String   @id @default(cuid())
+  version     Int
+  workflowId  String   @map("workflow_id")
+  /// JSON-encoded array of workflow steps with multi-vector selectors
+  steps       Json
+  /// Metadata: description of changes, etc.
+  changelog   String?
+  publishedAt DateTime @default(now()) @map("published_at")
+
+  workflow    Workflow       @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  runs        WorkflowRun[]
+
+  @@unique([workflowId, version])
+  @@index([workflowId])
+  @@map("workflow_versions")
+}
+
+// ── Runs ──
+
+model WorkflowRun {
+  id              String    @id @default(cuid())
+  status          RunStatus @default(QUEUED)
+  versionId       String    @map("version_id")
+  triggeredBy     TriggerType @default(MANUAL)
+  /// BullMQ job ID
+  jobId           String?   @map("job_id")
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  /// Duration in milliseconds
+  durationMs      Int?      @map("duration_ms")
+  failureReason   String?   @map("failure_reason")
+  /// S3 URL for session video replay
+  videoUrl        String?   @map("video_url")
+  /// S3 URL for failure screenshot
+  screenshotUrl   String?   @map("screenshot_url")
+  /// S3 URL for Playwright trace
+  traceUrl        String?   @map("trace_url")
+  /// Browser minutes consumed
+  browserMinutes  Float?    @map("browser_minutes")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  version         WorkflowVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  stepLogs        RunStepLog[]
+  usageRecord     UsageRecord?
+
+  @@index([versionId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("workflow_runs")
+}
+
+model RunStepLog {
+  id              String        @id @default(cuid())
+  runId           String        @map("run_id")
+  stepIndex       Int           @map("step_index")
+  stepType        String        @map("step_type")
+  status          StepLogStatus @default(PENDING)
+  /// The selector that was actually used (may differ from primary if self-healed)
+  selectorUsed    String?       @map("selector_used")
+  /// Whether self-healing was triggered
+  selfHealed      Boolean       @default(false) @map("self_healed")
+  /// Original selector that failed (if self-healed)
+  originalSelector String?      @map("original_selector")
+  /// Structured log output
+  output          Json?
+  /// Error message if step failed
+  error           String?
+  screenshotUrl   String?       @map("screenshot_url")
+  startedAt       DateTime?     @map("started_at")
+  completedAt     DateTime?     @map("completed_at")
+  durationMs      Int?          @map("duration_ms")
+
+  run             WorkflowRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@map("run_step_logs")
+}
+
+// ── Scheduling ──
+
+model Schedule {
+  id           String          @id @default(cuid())
+  workflowId   String          @map("workflow_id")
+  cronExpr     String          @map("cron_expr")
+  timezone     String          @default("UTC")
+  isActive     Boolean         @default(true) @map("is_active")
+  /// BullMQ repeatable job key
+  bullmqJobKey String?         @map("bullmq_job_key")
+  lastRunAt    DateTime?       @map("last_run_at")
+  nextRunAt    DateTime?       @map("next_run_at")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  workflow     Workflow        @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@index([isActive])
+  @@map("schedules")
+}
+
+// ── Credentials ──
+
+model Credential {
+  id              String   @id @default(cuid())
+  name            String
+  /// Type of credential (e.g., username_password, api_key, oauth_token)
+  type            String
+  userId          String   @map("user_id")
+  /// AES-256-GCM encrypted value
+  encryptedValue  String   @map("encrypted_value")
+  /// Initialization vector for AES-256-GCM
+  iv              String
+  /// Authentication tag for AES-256-GCM
+  authTag         String   @map("auth_tag")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("credentials")
+}
+
+// ── Usage Tracking ──
+
+model UsageRecord {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  runId          String?  @unique @map("run_id")
+  browserMinutes Float    @map("browser_minutes")
+  storageBytes   BigInt?  @map("storage_bytes")
+  recordedAt     DateTime @default(now()) @map("recorded_at")
+
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run            WorkflowRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([recordedAt])
+  @@map("usage_records")
+}
+
+// ── Enums ──
+
+enum Plan {
+  FREE
+  PRO
+  TEAM
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum WorkflowStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum StepLogStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED
+  SELF_HEALED
+}
+
+enum TriggerType {
+  MANUAL
+  SCHEDULED
+  WEBHOOK
+}
