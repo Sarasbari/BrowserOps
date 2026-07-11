@@ -68,6 +68,8 @@ model Workflow {
   status      WorkflowStatus @default(DRAFT)
   userId      String         @map("user_id")
   workspaceId String?        @map("workspace_id")
+  /// JSON-encoded draft steps from the builder canvas (not yet published)
+  draftSteps  Json?          @map("draft_steps")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 

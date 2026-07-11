@@ -3,26 +3,28 @@
  * ═════════════════════════════════════════
  * Executes workflow steps using Playwright with self-healing selectors.
  * Implements video recording and step-level logging per TRD Section 4.
+ *
+ * Supports:
+ * - Zod-validated step schemas
+ * - Between-step cancellation checks
+ * - Secret sanitization in error messages
  */
 import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { prisma } from "./prisma";
 import { resolveElement, type MultiVectorSelector } from "./self-healing";
+import {
+  parseWorkflowSteps,
+  sanitizeSecrets,
+  type WorkflowStep,
+} from "./workflow-schema";
+import {
+  isCancelled,
+  clearCancellation,
+  skipRemainingSteps,
+  CancellationError,
+} from "./cancellation";
 
-export interface WorkflowStep {
-  type: string;
-  label: string;
-  config: {
-    url?: string;
-    selectors?: MultiVectorSelector;
-    text?: string;
-    key?: string;
-    timeout?: number;
-    waitMs?: number;
-    credentialId?: string;
-    outputKey?: string;
-    [key: string]: unknown;
-  };
-}
+export type { WorkflowStep };
 
 export interface ExecutionResult {
   success: boolean;
@@ -31,13 +33,20 @@ export interface ExecutionResult {
   stepsTotal: number;
   failureReason?: string;
   videoPath?: string;
+  cancelled?: boolean;
 }
 
 /**
  * Main workflow executor — runs a complete workflow version.
+ * @param runId - The WorkflowRun ID to execute.
+ * @param cancellationChecker - Optional override for cancellation check (for testing).
  */
-export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
+export async function executeWorkflow(
+  runId: string,
+  cancellationChecker?: () => Promise<boolean>
+): Promise<ExecutionResult> {
   const startTime = Date.now();
+  const checkCancelled = cancellationChecker || (() => isCancelled(runId));
 
   // 1. Load run + version + steps
   const run = await prisma.workflowRun.findUnique({
@@ -53,7 +62,49 @@ export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
 
   if (!run) throw new Error(`Run ${runId} not found`);
 
-  const steps = run.version.steps as unknown as WorkflowStep[];
+  // ── Idempotency guard ──
+  // If this run already finished (completed, cancelled, or failed with no retries left),
+  // do not re-execute. This prevents BullMQ retries from duplicating work.
+  if (
+    run.status === "COMPLETED" ||
+    run.status === "CANCELLED"
+  ) {
+    console.log(`⏭ Run ${runId} already ${run.status}, skipping`);
+    return {
+      success: run.status === "COMPLETED",
+      durationMs: 0,
+      stepsCompleted: 0,
+      stepsTotal: 0,
+      cancelled: run.status === "CANCELLED",
+    };
+  }
+
+  // ── Validate steps with Zod ──
+  const rawSteps = run.version.steps;
+  const parsed = parseWorkflowSteps(rawSteps);
+  if (!parsed.success || !parsed.data) {
+    const reason = sanitizeSecrets(
+      `Invalid workflow steps: ${parsed.error || "unknown validation error"}`
+    );
+    await prisma.workflowRun.update({
+      where: { id: runId },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        durationMs: Date.now() - startTime,
+        failureReason: reason,
+      },
+    });
+    return {
+      success: false,
+      durationMs: Date.now() - startTime,
+      stepsCompleted: 0,
+      stepsTotal: 0,
+      failureReason: reason,
+    };
+  }
+
+  const steps = parsed.data;
   const userId = run.version.workflow.userId;
 
   // 2. Mark as running
@@ -87,8 +138,44 @@ export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
 
     // 4. Execute each step
     for (let i = 0; i < steps.length; i++) {
+      // ── Cancellation check between steps ──
+      if (await checkCancelled()) {
+        await skipRemainingSteps(runId);
+        const durationMs = Date.now() - startTime;
+        await prisma.workflowRun.update({
+          where: { id: runId },
+          data: {
+            status: "CANCELLED",
+            completedAt: new Date(),
+            durationMs,
+            browserMinutes: durationMs / 60000,
+          },
+        });
+        await clearCancellation(runId);
+        return {
+          success: false,
+          durationMs,
+          stepsCompleted,
+          stepsTotal: steps.length,
+          cancelled: true,
+        };
+      }
+
       const step = steps[i];
       const stepStart = Date.now();
+
+      // Check for existing step log (idempotency for retries)
+      const existingLog = await prisma.runStepLog.findFirst({
+        where: {
+          runId,
+          stepIndex: i,
+          status: { in: ["COMPLETED", "SELF_HEALED"] },
+        },
+      });
+      if (existingLog) {
+        stepsCompleted++;
+        continue; // Skip already-completed steps on retry
+      }
 
       // Log step start
       const stepLog = await prisma.runStepLog.create({
@@ -130,11 +217,15 @@ export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
           // Screenshot capture failed, continue
         }
 
+        const errorMsg = sanitizeSecrets(
+          stepError instanceof Error ? stepError.message : String(stepError)
+        );
+
         await prisma.runStepLog.update({
           where: { id: stepLog.id },
           data: {
             status: "FAILED",
-            error: stepError instanceof Error ? stepError.message : String(stepError),
+            error: errorMsg,
             screenshotUrl,
             completedAt: new Date(),
             durationMs: Date.now() - stepStart,
@@ -165,6 +256,8 @@ export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
       },
     });
 
+    await clearCancellation(runId);
+
     return {
       success: true,
       durationMs,
@@ -175,23 +268,29 @@ export async function executeWorkflow(runId: string): Promise<ExecutionResult> {
   } catch (error) {
     // Mark run as failed
     const durationMs = Date.now() - startTime;
+    const failureReason = sanitizeSecrets(
+      error instanceof Error ? error.message : String(error)
+    );
+
     await prisma.workflowRun.update({
       where: { id: runId },
       data: {
         status: "FAILED",
         completedAt: new Date(),
         durationMs,
-        failureReason: error instanceof Error ? error.message : String(error),
+        failureReason,
         browserMinutes: durationMs / 60000,
       },
     });
+
+    await clearCancellation(runId);
 
     return {
       success: false,
       durationMs,
       stepsCompleted,
       stepsTotal: steps.length,
-      failureReason: error instanceof Error ? error.message : String(error),
+      failureReason,
     };
   } finally {
     if (browser) {
@@ -216,7 +315,7 @@ async function executeStep(
   step: WorkflowStep,
   _userId: string
 ): Promise<StepResult> {
-  const timeout = step.config.timeout || 30000;
+  const timeout = ("timeout" in step.config && step.config.timeout) || 30000;
 
   switch (step.type) {
     case "open_url":
@@ -239,17 +338,19 @@ async function executeStep(
       return executeSaveOutput(step);
     case "human_intervention":
       return executeHumanIntervention(step, timeout);
-    default:
-      throw new Error(`Unknown step type: ${step.type}`);
+    default: {
+      // Exhaustive check — Zod validation should prevent reaching here
+      const _exhaustive: never = step;
+      throw new Error(`Unknown step type: ${(_exhaustive as WorkflowStep).type}`);
+    }
   }
 }
 
 async function executeOpenUrl(
   page: Page,
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "open_url" }>,
   timeout: number
 ): Promise<StepResult> {
-  if (!step.config.url) throw new Error("URL is required for open_url step");
   await page.goto(step.config.url, {
     waitUntil: "domcontentloaded",
     timeout,
@@ -259,12 +360,14 @@ async function executeOpenUrl(
 
 async function executeClickElement(
   page: Page,
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "click_element" }>,
   timeout: number
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for click");
-
-  const result = await resolveElement(page, step.config.selectors, timeout);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector,
+    timeout
+  );
 
   if (result.element) {
     await result.element.click({ timeout });
@@ -280,13 +383,14 @@ async function executeClickElement(
 
 async function executeTypeText(
   page: Page,
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "type_text" }>,
   timeout: number
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for type_text");
-  if (!step.config.text) throw new Error("Text is required for type_text");
-
-  const result = await resolveElement(page, step.config.selectors, timeout);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector,
+    timeout
+  );
 
   if (result.element) {
     await result.element.click({ timeout });
@@ -303,12 +407,14 @@ async function executeTypeText(
 
 async function executeWaitForSelector(
   page: Page,
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "wait_for_selector" }>,
   timeout: number
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for wait");
-
-  const result = await resolveElement(page, step.config.selectors, timeout);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector,
+    timeout
+  );
 
   if (result.element) {
     await result.element.waitForElementState("visible", { timeout });
@@ -323,11 +429,12 @@ async function executeWaitForSelector(
 
 async function executeExtractText(
   page: Page,
-  step: WorkflowStep
+  step: Extract<WorkflowStep, { type: "extract_text" }>
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for extract");
-
-  const result = await resolveElement(page, step.config.selectors);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector
+  );
 
   let text = "";
   if (result.element) {
@@ -347,11 +454,12 @@ async function executeExtractText(
 
 async function executeExtractTable(
   page: Page,
-  step: WorkflowStep
+  step: Extract<WorkflowStep, { type: "extract_table" }>
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for table extract");
-
-  const result = await resolveElement(page, step.config.selectors);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector
+  );
   let tableData: string[][] = [];
 
   if (result.element) {
@@ -383,7 +491,7 @@ async function executeExtractTable(
 
 async function executeDownloadFile(
   page: Page,
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "download_file" }>,
   timeout: number
 ): Promise<StepResult> {
   const downloadPromise = page.waitForEvent("download", { timeout });
@@ -410,11 +518,12 @@ async function executeDownloadFile(
 
 async function executeUploadFile(
   page: Page,
-  step: WorkflowStep
+  step: Extract<WorkflowStep, { type: "upload_file" }>
 ): Promise<StepResult> {
-  if (!step.config.selectors) throw new Error("Selectors required for upload");
-
-  const result = await resolveElement(page, step.config.selectors);
+  const result = await resolveElement(
+    page,
+    step.config.selectors as MultiVectorSelector
+  );
 
   if (result.element) {
     const filePath = step.config.text || "";
@@ -428,7 +537,9 @@ async function executeUploadFile(
   };
 }
 
-async function executeSaveOutput(step: WorkflowStep): Promise<StepResult> {
+async function executeSaveOutput(
+  step: Extract<WorkflowStep, { type: "save_output" }>
+): Promise<StepResult> {
   return {
     selfHealed: false,
     output: {
@@ -439,7 +550,7 @@ async function executeSaveOutput(step: WorkflowStep): Promise<StepResult> {
 }
 
 async function executeHumanIntervention(
-  step: WorkflowStep,
+  step: Extract<WorkflowStep, { type: "human_intervention" }>,
   timeout: number
 ): Promise<StepResult> {
   // In production: pause the run, send WebSocket notification, wait for user

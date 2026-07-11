@@ -2,11 +2,21 @@
  * BrowserOps — BullMQ Queue Configuration
  * ═══════════════════════════════════════
  * Central queue setup for workflow execution.
- * Uses BullMQ's built-in Redis connection (avoids ioredis version conflicts).
+ * Exports shared Redis connection for cancellation/signaling.
  */
 import { Queue, Worker, Job } from "bullmq";
+import Redis from "ioredis";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+
+// ── Shared Redis Connection (for cancellation keys, etc.) ──
+export const redis = new Redis(REDIS_URL, {
+  maxRetriesPerRequest: null, // Required by BullMQ
+  lazyConnect: true,
+});
+
+// Connect on first use (ignore errors during module load in test env)
+redis.connect().catch(() => {});
 
 // ── Workflow Execution Queue ──
 export const workflowQueue = new Queue("workflow-execution", {
@@ -52,6 +62,26 @@ export async function enqueueWorkflowRun(data: WorkflowJobData) {
     priority: 1,
   });
   return job;
+}
+
+/**
+ * Remove a queued job by ID (for cancellation of QUEUED runs).
+ * Returns true if the job was successfully removed, false otherwise.
+ */
+export async function removeJob(jobId: string): Promise<boolean> {
+  try {
+    const job = await workflowQueue.getJob(jobId);
+    if (job) {
+      const state = await job.getState();
+      if (state === "waiting" || state === "delayed") {
+        await job.remove();
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**

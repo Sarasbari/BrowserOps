@@ -1,11 +1,16 @@
 /**
  * BrowserOps — Workflow Versions API
  * GET  /api/workflows/[id]/versions       — List versions
- * POST /api/workflows/[id]/versions       — Create new version (save steps)
+ * POST /api/workflows/[id]/versions       — Publish new version (validates steps with Zod)
+ *
+ * On publish: validates steps, creates version, clears draftSteps, and
+ * sets workflow status to PUBLISHED.
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { requireAuth, isAuthError } from "@/lib/auth-helpers";
+import { parseWorkflowSteps } from "@/lib/workflow-schema";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -62,6 +67,15 @@ export async function POST(req: Request, { params }: Params) {
     );
   }
 
+  // ── Validate steps with Zod ──
+  const parsed = parseWorkflowSteps(steps);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid workflow steps", details: parsed.error },
+      { status: 400 }
+    );
+  }
+
   // Get latest version number
   const latest = await prisma.workflowVersion.findFirst({
     where: { workflowId: id },
@@ -71,22 +85,25 @@ export async function POST(req: Request, { params }: Params) {
 
   const nextVersion = (latest?.version ?? 0) + 1;
 
-  const version = await prisma.workflowVersion.create({
-    data: {
-      workflowId: id,
-      version: nextVersion,
-      steps,
-      changelog: changelog || `Version ${nextVersion}`,
-    },
-  });
-
-  // Auto-publish if workflow is still draft
-  if (workflow.status === "DRAFT") {
-    await prisma.workflow.update({
+  // Create version + update workflow in a transaction
+  const [version] = await prisma.$transaction([
+    prisma.workflowVersion.create({
+      data: {
+        workflowId: id,
+        version: nextVersion,
+        steps: parsed.data!,
+        changelog: changelog || `Version ${nextVersion}`,
+      },
+    }),
+    // Clear draft steps and set status to PUBLISHED
+    prisma.workflow.update({
       where: { id },
-      data: { status: "PUBLISHED" },
-    });
-  }
+      data: {
+        status: "PUBLISHED",
+        draftSteps: Prisma.DbNull, // Clear draft on publish
+      },
+    }),
+  ]);
 
   return NextResponse.json({ version }, { status: 201 });
 }

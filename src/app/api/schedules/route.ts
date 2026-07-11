@@ -1,11 +1,12 @@
 /**
  * BrowserOps — Schedule API
  * GET  /api/schedules       — List schedules
- * POST /api/schedules       — Create schedule
+ * POST /api/schedules       — Create schedule (registers BullMQ repeatable job)
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, isAuthError } from "@/lib/auth-helpers";
+import { registerSchedule } from "@/lib/queue";
 
 export async function GET() {
   const authResult = await requireAuth();
@@ -76,11 +77,22 @@ export async function POST(req: Request) {
     },
   });
 
-  // TODO: Register repeatable job with BullMQ
-  // await scheduleQueue.add("scheduled-run", { workflowId, scheduleId }, {
-  //   repeat: { pattern: cronExpr, tz: timezone },
-  //   jobId: schedule.id,
-  // });
+  // ── Register repeatable job with BullMQ ──
+  try {
+    const job = await registerSchedule(
+      schedule.id,
+      workflowId,
+      cronExpr.trim(),
+      timezone || "UTC"
+    );
+    await prisma.schedule.update({
+      where: { id: schedule.id },
+      data: { bullmqJobKey: job.repeatJobKey || null },
+    });
+  } catch (err) {
+    console.error("Failed to register BullMQ schedule:", err);
+    // Schedule is still created in DB — can be retried
+  }
 
   return NextResponse.json({ schedule }, { status: 201 });
 }

@@ -2,10 +2,17 @@
  * BrowserOps — Run Management API
  * GET  /api/runs       — List user's runs
  * POST /api/runs       — Trigger a new workflow run
+ *
+ * POST supports:
+ * - Version gating: only published workflows can execute (unless testRun=true)
+ * - Atomic create + enqueue with compensation on failure
+ * - Zod validation of workflow steps before enqueue
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, isAuthError } from "@/lib/auth-helpers";
+import { enqueueWorkflowRun } from "@/lib/queue";
+import { parseWorkflowSteps } from "@/lib/workflow-schema";
 
 export async function GET(req: Request) {
   const authResult = await requireAuth();
@@ -63,7 +70,7 @@ export async function POST(req: Request) {
   const { dbUserId } = authResult;
 
   const body = await req.json();
-  const { workflowId, versionId } = body;
+  const { workflowId, versionId, testRun } = body;
 
   if (!workflowId) {
     return NextResponse.json(
@@ -83,7 +90,18 @@ export async function POST(req: Request) {
     );
   }
 
-  // Resolve version (use specific or latest)
+  // ── Version gating (Requirement 6) ──
+  if (!testRun && workflow.status !== "PUBLISHED") {
+    return NextResponse.json(
+      {
+        error:
+          "Only published workflows can be executed. Use testRun: true for draft workflows, or publish the workflow first.",
+      },
+      { status: 400 }
+    );
+  }
+
+  // Resolve version
   let version;
   if (versionId) {
     version = await prisma.workflowVersion.findFirst({
@@ -98,22 +116,58 @@ export async function POST(req: Request) {
 
   if (!version) {
     return NextResponse.json(
-      { error: "No published version found. Save the workflow first." },
+      { error: "No version found. Save the workflow first." },
       { status: 400 }
     );
   }
 
-  // Create the run record
+  // ── Validate steps ──
+  const parsed = parseWorkflowSteps(version.steps);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid workflow steps", details: parsed.error },
+      { status: 400 }
+    );
+  }
+
+  // ── Atomic create + enqueue with compensation ──
   const run = await prisma.workflowRun.create({
     data: {
       versionId: version.id,
-      triggeredBy: "MANUAL",
+      triggeredBy: testRun ? "MANUAL" : "MANUAL",
       status: "QUEUED",
     },
   });
 
-  // TODO: Enqueue to BullMQ
-  // await workflowQueue.add("execute", { runId: run.id }, { jobId: run.id });
+  try {
+    const job = await enqueueWorkflowRun({
+      runId: run.id,
+      versionId: version.id,
+      userId: dbUserId,
+    });
 
-  return NextResponse.json({ run }, { status: 201 });
+    // Persist the BullMQ job ID
+    await prisma.workflowRun.update({
+      where: { id: run.id },
+      data: { jobId: job.id },
+    });
+  } catch (enqueueError) {
+    // ── Compensation: mark run as failed if enqueue fails ──
+    await prisma.workflowRun.update({
+      where: { id: run.id },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        failureReason: "Failed to enqueue job for execution",
+      },
+    });
+
+    console.error("Enqueue failed:", enqueueError);
+    return NextResponse.json(
+      { error: "Failed to enqueue workflow run", run: { id: run.id, status: "FAILED" } },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({ run: { id: run.id, status: "QUEUED", jobId: run.id } }, { status: 201 });
 }

@@ -1,11 +1,18 @@
 /**
  * BrowserOps — Single Run API
- * GET /api/runs/[id]        — Get run details with step logs
- * POST /api/runs/[id]/cancel — Cancel a running/queued run
+ * GET   /api/runs/[id]  — Get run details with step logs
+ * PATCH /api/runs/[id]  — Cancel a running/queued run
+ *
+ * Cancellation:
+ * - QUEUED: removes job from BullMQ queue
+ * - RUNNING: sets Redis cancellation key (worker checks between steps)
+ * - Remaining PENDING steps are marked SKIPPED
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, isAuthError } from "@/lib/auth-helpers";
+import { removeJob } from "@/lib/queue";
+import { requestCancellation, skipRemainingSteps } from "@/lib/cancellation";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -65,13 +72,32 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 
   if (action === "cancel") {
-    if (run.status !== "QUEUED" && run.status !== "RUNNING" && run.status !== "PAUSED") {
+    if (
+      run.status !== "QUEUED" &&
+      run.status !== "RUNNING" &&
+      run.status !== "PAUSED"
+    ) {
       return NextResponse.json(
         { error: "Can only cancel queued, running, or paused runs" },
         { status: 400 }
       );
     }
 
+    // ── Cancel based on current state ──
+    if (run.status === "QUEUED" && run.jobId) {
+      // Remove from BullMQ queue
+      await removeJob(run.jobId);
+    }
+
+    if (run.status === "RUNNING") {
+      // Signal the worker via Redis
+      await requestCancellation(id);
+    }
+
+    // Mark remaining pending step logs as SKIPPED
+    await skipRemainingSteps(id);
+
+    // Update run status
     const updated = await prisma.workflowRun.update({
       where: { id },
       data: {
@@ -79,8 +105,6 @@ export async function PATCH(req: Request, { params }: Params) {
         completedAt: new Date(),
       },
     });
-
-    // TODO: Cancel BullMQ job if running
 
     return NextResponse.json({ run: updated });
   }
