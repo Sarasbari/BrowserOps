@@ -12,7 +12,6 @@ vi.mock("@clerk/nextjs/server", () => ({
   auth: () => mockAuth(),
 }));
 
-// ── Mock Prisma ──
 const mockPrisma = {
   user: { findUnique: vi.fn(), create: vi.fn() },
   workflow: { findFirst: vi.fn() },
@@ -25,6 +24,8 @@ const mockPrisma = {
     count: vi.fn(),
   },
   runStepLog: { updateMany: vi.fn() },
+  workspaceMember: { findFirst: vi.fn() },
+  workspace: { findUnique: vi.fn() },
 };
 vi.mock("@/lib/prisma", () => ({
   prisma: mockPrisma,
@@ -64,6 +65,18 @@ function makeGetRequest(query = "") {
 function setupAuth(clerkId = "user_123", dbUserId = "db_user_1") {
   mockAuth.mockResolvedValue({ userId: clerkId });
   mockPrisma.user.findUnique.mockResolvedValue({ id: dbUserId, clerkId });
+  mockPrisma.workspaceMember.findFirst.mockResolvedValue({
+    role: "OWNER",
+    workspaceId: "workspace_1",
+    workspace: { id: "workspace_1" },
+  });
+  mockPrisma.workspace.findUnique.mockResolvedValue({
+    id: "workspace_1",
+    browserMinutesUsed: 0,
+    browserMinutesLimit: 1000,
+    storageBytesUsed: 0,
+    storageBytesLimit: 1000000,
+  });
 }
 
 function setupPublishedWorkflow() {

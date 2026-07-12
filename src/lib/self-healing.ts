@@ -36,185 +36,129 @@ export interface SelfHealResult {
   originalSelector?: string;
   /** The new selector that worked (if self-healed) */
   newSelector?: string;
+  /** Confidence score of the resolved selector (0.0 to 1.0) */
+  confidenceScore: number;
+  /** DOM snippet of the resolved element */
+  evidenceSnippet?: string | null;
+  /** True if multiple candidate elements matched this selector */
+  multipleMatches?: boolean;
 }
 
 /**
- * Attempts to find an element using a multi-vector selector approach.
- * Falls back through multiple strategies if the primary selector fails.
- *
- * Strategy order (per TRD Section 4.2):
- * 1. Primary selector (id or data-testid)
- * 2. Text content within proximity
- * 3. CSS selector with increasing generalization
- * 4. aria-label
- * 5. Visual position proximity (if available)
+ * Attempts to find a single element using a multi-vector selector approach.
+ * Checks for uniqueness to prevent blind clicks on duplicate candidates.
  */
+export function rankSelectors(selectors: MultiVectorSelector): { selector: string; strategy: string; score: number }[] {
+  const candidates: { selector: string; strategy: string; score: number }[] = [];
+
+  if (selectors.testId) {
+    candidates.push({
+      selector: `[data-testid="${selectors.testId}"]`,
+      strategy: "testId",
+      score: 0.95,
+    });
+  }
+
+  if (selectors.ariaLabel) {
+    candidates.push({
+      selector: `[aria-label="${selectors.ariaLabel}"]`,
+      strategy: "ariaLabel",
+      score: 0.90,
+    });
+  }
+
+  if (selectors.text) {
+    candidates.push({
+      selector: `text=${selectors.text}`,
+      strategy: "text",
+      score: 0.85,
+    });
+  }
+
+  if (selectors.css) {
+    candidates.push({
+      selector: selectors.css,
+      strategy: "css",
+      score: 0.75,
+    });
+  }
+
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
 export async function resolveElement(
   page: Page,
   selectors: MultiVectorSelector,
   timeout: number = 5000
 ): Promise<SelfHealResult> {
-  // Strategy 1: Primary selector
-  try {
-    const element = await page.waitForSelector(selectors.primary, {
-      timeout: Math.min(timeout, 3000),
-    });
-    if (element) {
-      return {
-        found: true,
-        element,
-        strategy: "primary",
-        selfHealed: false,
-      };
-    }
-  } catch {
-    // Primary failed, continue to fallbacks
+  const original = selectors.primary;
+
+  // 1. Try Primary Selector
+  const primaryRes = await evaluateSelectorCandidate(page, original, "primary", original, 1.0);
+  if (primaryRes && primaryRes.found && !primaryRes.multipleMatches) {
+    return primaryRes;
   }
 
-  // Strategy 2: data-testid
-  if (selectors.testId) {
-    try {
-      const element = await page.waitForSelector(
-        `[data-testid="${selectors.testId}"]`,
-        { timeout: 2000 }
-      );
-      if (element) {
-        return {
-          found: true,
-          element,
-          strategy: "testId",
-          selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: `[data-testid="${selectors.testId}"]`,
-        };
-      }
-    } catch {
-      // Continue
-    }
-  }
+  // Gather fallback candidates with confidence scores
+  const candidates = rankSelectors(selectors);
 
-  // Strategy 3: Text content
+  // Add partial/generalized fallback
   if (selectors.text) {
-    try {
-      const element = await page.waitForSelector(
-        `text="${selectors.text}"`,
-        { timeout: 2000 }
-      );
-      if (element) {
-        return {
-          found: true,
-          element,
-          strategy: "text",
-          selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: `text="${selectors.text}"`,
-        };
-      }
-    } catch {
-      // Continue
-    }
-
-    // Try partial text match
-    try {
-      const element = await page.waitForSelector(
-        `text=${selectors.text}`,
-        { timeout: 1500 }
-      );
-      if (element) {
-        return {
-          found: true,
-          element,
-          strategy: "text-partial",
-          selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: `text=${selectors.text}`,
-        };
-      }
-    } catch {
-      // Continue
-    }
+    candidates.push({
+      selector: `text=${selectors.text}`,
+      strategy: "text-partial",
+      score: 0.70,
+    });
   }
-
-  // Strategy 4: CSS selector with generalization
   if (selectors.css) {
-    try {
-      const element = await page.waitForSelector(selectors.css, {
-        timeout: 2000,
+    const generalized = generalizeSelector(selectors.css);
+    if (generalized !== selectors.css) {
+      candidates.push({
+        selector: generalized,
+        strategy: "css-generalized",
+        score: 0.60,
       });
-      if (element) {
-        return {
-          found: true,
-          element,
-          strategy: "css",
-          selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: selectors.css,
-        };
-      }
-    } catch {
-      // Try removing dynamic classes (classes with numbers/hashes)
-      const generalizedCss = generalizeSelector(selectors.css);
-      if (generalizedCss !== selectors.css) {
-        try {
-          const element = await page.waitForSelector(generalizedCss, {
-            timeout: 1500,
-          });
-          if (element) {
-            return {
-              found: true,
-              element,
-              strategy: "css-generalized",
-              selfHealed: true,
-              originalSelector: selectors.primary,
-              newSelector: generalizedCss,
-            };
-          }
-        } catch {
-          // Continue
-        }
+    }
+  }
+
+  // 2. Evaluate all candidates in priority order, looking for a UNIQUE match first
+  let bestMultipleMatch: SelfHealResult | null = primaryRes && primaryRes.multipleMatches ? primaryRes : null;
+
+  for (const cand of candidates) {
+    const res = await evaluateSelectorCandidate(page, cand.selector, cand.strategy, original, cand.score);
+    if (res && res.found) {
+      if (!res.multipleMatches) {
+        return res; // Found a unique fallback match!
+      } else if (!bestMultipleMatch || res.confidenceScore > bestMultipleMatch.confidenceScore) {
+        bestMultipleMatch = res; // Remember the best non-unique match
       }
     }
   }
 
-  // Strategy 5: aria-label
-  if (selectors.ariaLabel) {
-    try {
-      const element = await page.waitForSelector(
-        `[aria-label="${selectors.ariaLabel}"]`,
-        { timeout: 2000 }
-      );
-      if (element) {
-        return {
-          found: true,
-          element,
-          strategy: "ariaLabel",
-          selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: `[aria-label="${selectors.ariaLabel}"]`,
-        };
-      }
-    } catch {
-      // Continue
-    }
-  }
-
-  // Strategy 6: Visual position proximity
+  // 3. Try visual proximity as a last-resort fallback
   if (selectors.position) {
     try {
-      const element = await findByVisualProximity(page, selectors.position);
-      if (element) {
+      const visualEl = await findByVisualProximity(page, selectors.position);
+      if (visualEl) {
+        const html = await visualEl.evaluate(el => el.outerHTML.slice(0, 500)).catch(() => null);
         return {
           found: true,
-          element,
-          strategy: "visual-position",
+          element: visualEl,
+          strategy: "visual-proximity",
           selfHealed: true,
-          originalSelector: selectors.primary,
-          newSelector: `visual-position(${selectors.position.x}, ${selectors.position.y})`,
+          originalSelector: original,
+          newSelector: `point(${selectors.position.x}, ${selectors.position.y})`,
+          confidenceScore: 0.50,
+          evidenceSnippet: html,
+          multipleMatches: false,
         };
       }
-    } catch {
-      // Continue
-    }
+    } catch {}
+  }
+
+  // 4. If we only have multiple matches, return it but flag it
+  if (bestMultipleMatch) {
+    return bestMultipleMatch;
   }
 
   // All strategies exhausted
@@ -223,8 +167,53 @@ export async function resolveElement(
     element: null,
     strategy: "none",
     selfHealed: false,
-    originalSelector: selectors.primary,
+    originalSelector: original,
+    confidenceScore: 0.0,
   };
+}
+
+/**
+ * Evaluates a single selector candidate and returns element details.
+ */
+async function evaluateSelectorCandidate(
+  page: Page,
+  selector: string,
+  strategy: string,
+  originalSelector: string,
+  baseScore: number
+): Promise<SelfHealResult | null> {
+  try {
+    // Check if element exists (short timeout to keep fallback traversal fast)
+    const elements = await page.$$(selector);
+    if (elements.length === 1) {
+      const html = await elements[0].evaluate(el => el.outerHTML.slice(0, 500)).catch(() => null);
+      return {
+        found: true,
+        element: elements[0],
+        strategy,
+        selfHealed: strategy !== "primary",
+        originalSelector,
+        newSelector: selector,
+        confidenceScore: baseScore,
+        evidenceSnippet: html,
+        multipleMatches: false,
+      };
+    } else if (elements.length > 1) {
+      const html = await elements[0].evaluate(el => el.outerHTML.slice(0, 500)).catch(() => null);
+      return {
+        found: true,
+        element: elements[0], // Return first candidate but flag it
+        strategy,
+        selfHealed: strategy !== "primary",
+        originalSelector,
+        newSelector: selector,
+        confidenceScore: baseScore * 0.4, // Penalize heavily for duplicates
+        evidenceSnippet: html,
+        multipleMatches: true,
+      };
+    }
+  } catch {}
+  return null;
 }
 
 /**
@@ -245,8 +234,7 @@ function generalizeSelector(css: string): string {
 
 /**
  * Attempts to find an element near a known visual position.
- * Uses the page's elementFromPoint API to find clickable elements
- * in the vicinity of the stored coordinates.
+ * Uses the page's elementFromPoint API to find clickable elements.
  */
 async function findByVisualProximity(
   page: Page,

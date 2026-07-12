@@ -14,10 +14,15 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const status = url.searchParams.get("status");
+  const workspaceId = url.searchParams.get("workspaceId");
   const page = parseInt(url.searchParams.get("page") || "1");
   const limit = parseInt(url.searchParams.get("limit") || "20");
 
-  const where: Record<string, unknown> = { userId: dbUserId };
+  const accessResult = await requireWorkspaceAccess(workspaceId);
+  if (isAuthError(accessResult)) return accessResult;
+  const { member } = accessResult;
+
+  const where: Record<string, unknown> = { workspaceId: member.workspaceId };
   if (status) where.status = status;
 
   const [workflows, total] = await Promise.all([
@@ -49,9 +54,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const authResult = await requireAuth();
-  if (isAuthError(authResult)) return authResult;
-  const { dbUserId } = authResult;
+  const url = new URL(req.url);
+  const workspaceId = url.searchParams.get("workspaceId");
+  const accessResult = await requireWorkspaceAccess(workspaceId);
+  if (isAuthError(accessResult)) return accessResult;
+  const { auth, member } = accessResult;
 
   const body = await req.json();
   const { name, description } = body;
@@ -67,7 +74,8 @@ export async function POST(req: Request) {
     data: {
       name: name.trim(),
       description: description?.trim() || null,
-      userId: dbUserId,
+      userId: auth.dbUserId,
+      workspaceId: member.workspaceId,
     },
   });
 

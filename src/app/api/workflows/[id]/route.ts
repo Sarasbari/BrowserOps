@@ -12,14 +12,14 @@ import { parseWorkflowSteps } from "@/lib/workflow-schema";
 
 type Params = { params: Promise<{ id: string }> };
 
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
   const authResult = await requireAuth();
   if (isAuthError(authResult)) return authResult;
   const { dbUserId } = authResult;
   const { id } = await params;
 
-  const workflow = await prisma.workflow.findFirst({
-    where: { id, userId: dbUserId },
+  const workflow = await prisma.workflow.findUnique({
+    where: { id },
     include: {
       versions: {
         orderBy: { version: "desc" },
@@ -38,11 +38,17 @@ export async function GET(_req: Request, { params }: Params) {
     },
   });
 
-  if (!workflow) {
+  if (!workflow || (workflow.userId !== dbUserId && !workflow.workspaceId)) {
     return NextResponse.json(
       { error: "Workflow not found" },
       { status: 404 }
     );
+  }
+
+  // If it's attached to a workspace, verify access
+  if (workflow.workspaceId) {
+    const access = await requireWorkspaceAccess(workflow.workspaceId);
+    if (isAuthError(access)) return access;
   }
 
   return NextResponse.json({ workflow });
@@ -54,18 +60,24 @@ export async function PATCH(req: Request, { params }: Params) {
   const { dbUserId } = authResult;
   const { id } = await params;
 
-  const body = await req.json();
-  const { name, description, status, draftSteps } = body;
-
-  const existing = await prisma.workflow.findFirst({
-    where: { id, userId: dbUserId },
+  const existing = await prisma.workflow.findUnique({
+    where: { id },
   });
-  if (!existing) {
+  
+  if (!existing || (existing.userId !== dbUserId && !existing.workspaceId)) {
     return NextResponse.json(
       { error: "Workflow not found" },
       { status: 404 }
     );
   }
+
+  if (existing.workspaceId) {
+    const access = await requireWorkspaceAccess(existing.workspaceId, "ADMIN");
+    if (isAuthError(access)) return access;
+  }
+
+  const body = await req.json();
+  const { name, description, status, draftSteps } = body;
 
   const updateData: Record<string, unknown> = {};
   if (name !== undefined) updateData.name = name.trim();
@@ -104,14 +116,20 @@ export async function DELETE(_req: Request, { params }: Params) {
   const { dbUserId } = authResult;
   const { id } = await params;
 
-  const existing = await prisma.workflow.findFirst({
-    where: { id, userId: dbUserId },
+  const existing = await prisma.workflow.findUnique({
+    where: { id },
   });
-  if (!existing) {
+  
+  if (!existing || (existing.userId !== dbUserId && !existing.workspaceId)) {
     return NextResponse.json(
       { error: "Workflow not found" },
       { status: 404 }
     );
+  }
+
+  if (existing.workspaceId) {
+    const access = await requireWorkspaceAccess(existing.workspaceId, "ADMIN");
+    if (isAuthError(access)) return access;
   }
 
   await prisma.workflow.delete({ where: { id } });

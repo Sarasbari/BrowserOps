@@ -8,13 +8,15 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, isAuthError } from "@/lib/auth-helpers";
 import { encryptCredential } from "@/lib/crypto";
 
-export async function GET() {
-  const authResult = await requireAuth();
-  if (isAuthError(authResult)) return authResult;
-  const { dbUserId } = authResult;
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const workspaceId = url.searchParams.get("workspaceId");
+  const accessResult = await requireWorkspaceAccess(workspaceId);
+  if (isAuthError(accessResult)) return accessResult;
+  const { auth, member } = accessResult;
 
   const credentials = await prisma.credential.findMany({
-    where: { userId: dbUserId },
+    where: { userId: auth.dbUserId },
     select: {
       id: true,
       name: true,
@@ -29,9 +31,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const authResult = await requireAuth();
-  if (isAuthError(authResult)) return authResult;
-  const { dbUserId } = authResult;
+  const url = new URL(req.url);
+  const workspaceId = url.searchParams.get("workspaceId");
+  const accessResult = await requireWorkspaceAccess(workspaceId, "ADMIN");
+  if (isAuthError(accessResult)) return accessResult;
+  const { auth, member } = accessResult;
 
   const body = await req.json();
   const { name, type, value } = body;
@@ -52,16 +56,18 @@ export async function POST(req: Request) {
   }
 
   // Encrypt the credential value
-  const encrypted = encryptCredential(value, dbUserId);
+  const encrypted = encryptCredential(value, auth.dbUserId);
 
   const credential = await prisma.credential.create({
     data: {
       name: name.trim(),
       type,
-      userId: dbUserId,
+      userId: auth.dbUserId,
       encryptedValue: encrypted.encryptedValue,
       iv: encrypted.iv,
       authTag: encrypted.authTag,
+      encryptedDek: encrypted.encryptedDek,
+      version: encrypted.version,
     },
     select: {
       id: true,

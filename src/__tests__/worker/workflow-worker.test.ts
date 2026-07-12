@@ -13,26 +13,38 @@ const mockDispose = vi.fn();
 const mockGoto = vi.fn();
 const mockScreenshot = vi.fn().mockResolvedValue(Buffer.from("fake-png"));
 const mockVideoPath = vi.fn().mockResolvedValue("/tmp/video.webm");
-const mockClose = vi.fn();
+const mockClose = vi.fn().mockResolvedValue(undefined);
 const mockWaitForSelector = vi.fn();
+const mockBrowser = {
+  newContext: vi.fn().mockResolvedValue({
+    newPage: vi.fn().mockResolvedValue({
+      goto: (...args: unknown[]) => mockGoto(...args),
+      screenshot: (...args: unknown[]) => mockScreenshot(...args),
+      video: () => ({ path: () => mockVideoPath() }),
+      click: vi.fn(),
+      waitForSelector: (...args: unknown[]) => mockWaitForSelector(...args),
+      evaluate: vi.fn(),
+      waitForEvent: vi.fn(),
+      route: vi.fn(),
+    }),
+    close: () => mockClose(),
+    tracing: {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    },
+  }),
+  close: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockBrowserServer = {
+  wsEndpoint: () => "ws://localhost:12345/playwright",
+  close: vi.fn().mockResolvedValue(undefined),
+};
 
 vi.mock("playwright", () => ({
   chromium: {
-    launch: vi.fn().mockResolvedValue({
-      newContext: vi.fn().mockResolvedValue({
-        newPage: vi.fn().mockResolvedValue({
-          goto: (...args: unknown[]) => mockGoto(...args),
-          screenshot: (...args: unknown[]) => mockScreenshot(...args),
-          video: () => ({ path: () => mockVideoPath() }),
-          click: vi.fn(),
-          waitForSelector: (...args: unknown[]) => mockWaitForSelector(...args),
-          evaluate: vi.fn(),
-          waitForEvent: vi.fn(),
-        }),
-        close: () => mockClose(),
-      }),
-      close: vi.fn().mockResolvedValue(undefined),
-    }),
+    launchServer: vi.fn().mockResolvedValue(mockBrowserServer),
+    connect: vi.fn().mockResolvedValue(mockBrowser),
   },
 }));
 
@@ -60,6 +72,8 @@ const mockStepLogCreate = vi.fn().mockResolvedValue({ id: "log_1" });
 const mockStepLogUpdate = vi.fn().mockResolvedValue({});
 const mockStepLogFindFirst = vi.fn().mockResolvedValue(null);
 const mockStepLogUpdateMany = vi.fn().mockResolvedValue({});
+const mockWorkspaceUpdate = vi.fn().mockResolvedValue({});
+const mockSelfHealingCreate = vi.fn().mockResolvedValue({});
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -72,6 +86,12 @@ vi.mock("@/lib/prisma", () => ({
       update: (...args: unknown[]) => mockStepLogUpdate(...args),
       findFirst: (...args: unknown[]) => mockStepLogFindFirst(...args),
       updateMany: (...args: unknown[]) => mockStepLogUpdateMany(...args),
+    },
+    workspace: {
+      update: (...args: unknown[]) => mockWorkspaceUpdate(...args),
+    },
+    selfHealingEvent: {
+      create: (...args: unknown[]) => mockSelfHealingCreate(...args),
     },
   },
 }));

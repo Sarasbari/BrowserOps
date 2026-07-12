@@ -10,7 +10,7 @@
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, isAuthError } from "@/lib/auth-helpers";
+import { requireAuth, isAuthError, requireWorkspaceAccess } from "@/lib/auth-helpers";
 import { enqueueWorkflowRun } from "@/lib/queue";
 import { parseWorkflowSteps } from "@/lib/workflow-schema";
 
@@ -79,15 +79,38 @@ export async function POST(req: Request) {
     );
   }
 
-  // Verify ownership
+  // Verify ownership and workspace access
   const workflow = await prisma.workflow.findFirst({
-    where: { id: workflowId, userId: dbUserId },
+    where: { id: workflowId },
   });
   if (!workflow) {
     return NextResponse.json(
       { error: "Workflow not found" },
       { status: 404 }
     );
+  }
+
+  const access = await requireWorkspaceAccess(workflow.workspaceId);
+  if (isAuthError(access)) return access;
+
+  // Quota enforcement
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workflow.workspaceId },
+  });
+
+  if (workspace) {
+    if (workspace.browserMinutesUsed >= workspace.browserMinutesLimit) {
+      return NextResponse.json(
+        { error: `Workspace browser minutes quota exceeded. Converted: ${workspace.browserMinutesUsed}/${workspace.browserMinutesLimit}` },
+        { status: 402 }
+      );
+    }
+    if (workspace.storageBytesUsed >= workspace.storageBytesLimit) {
+      return NextResponse.json(
+        { error: `Workspace storage quota exceeded. Converted: ${workspace.storageBytesUsed}/${workspace.storageBytesLimit}` },
+        { status: 402 }
+      );
+    }
   }
 
   // ── Version gating (Requirement 6) ──

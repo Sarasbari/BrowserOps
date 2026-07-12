@@ -2,7 +2,7 @@
  * BrowserOps — AES-256-GCM Credential Encryption
  * ═══════════════════════════════════════════════
  * Per-credential unique DEK, encrypted with user master key.
- * Follows TRD Section 4.5: Secure Credential Management.
+ * Implements Envelope Encryption for Data Encryption Keys (DEKs).
  */
 
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from "crypto";
@@ -42,49 +42,70 @@ export interface EncryptedPayload {
   iv: string;
   /** Base64-encoded GCM authentication tag */
   authTag: string;
+  /** Packed encrypted DEK for envelope encryption (format: iv:authTag:ciphertext) */
+  encryptedDek?: string | null;
+  /** Key version for rotation */
+  version?: number;
 }
 
 /**
- * Encrypts a plaintext credential value using AES-256-GCM.
+ * Encrypts a plaintext credential value using AES-256-GCM and Envelope Encryption.
  *
  * @param plaintext - The credential value to encrypt
  * @param userId - The user ID (used as additional authenticated data)
- * @returns Encrypted payload with IV and auth tag
+ * @returns Encrypted payload with IV, auth tag, and encrypted DEK
  */
 export function encryptCredential(
   plaintext: string,
   userId: string
 ): EncryptedPayload {
   const masterKey = getMasterKey();
+  
+  // 1. Generate DEK (Data Encryption Key)
+  const dek = randomBytes(KEY_LENGTH);
+  
+  // 2. Encrypt plaintext with DEK
   const iv = randomBytes(IV_LENGTH);
-
-  // Derive a unique key using the IV as salt (unique per encryption)
-  const key = deriveKey(masterKey, iv);
-
-  const cipher = createCipheriv(ALGORITHM, key, iv, {
+  const cipher = createCipheriv(ALGORITHM, dek, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });
 
   // Use userId as Additional Authenticated Data (AAD)
-  // Prevents encrypted values from being moved between users
   cipher.setAAD(Buffer.from(userId, "utf8"));
 
   let encrypted = cipher.update(plaintext, "utf8", "base64");
   encrypted += cipher.final("base64");
-
   const authTag = cipher.getAuthTag();
+
+  // 3. Encrypt DEK with KEK (Master Key)
+  const dekIv = randomBytes(IV_LENGTH);
+  const kek = deriveKey(masterKey, dekIv); // Key Encryption Key
+  
+  const dekCipher = createCipheriv(ALGORITHM, kek, dekIv, {
+    authTagLength: AUTH_TAG_LENGTH,
+  });
+  dekCipher.setAAD(Buffer.from(userId, "utf8"));
+  
+  let encryptedDekBase64 = dekCipher.update(dek).toString("base64");
+  encryptedDekBase64 += dekCipher.final("base64");
+  const dekAuthTag = dekCipher.getAuthTag();
+  
+  // Pack encrypted DEK string
+  const encryptedDek = `${dekIv.toString("base64")}:${dekAuthTag.toString("base64")}:${encryptedDekBase64}`;
 
   return {
     encryptedValue: encrypted,
     iv: iv.toString("base64"),
     authTag: authTag.toString("base64"),
+    encryptedDek,
+    version: 1
   };
 }
 
 /**
- * Decrypts an AES-256-GCM encrypted credential.
+ * Decrypts an AES-256-GCM encrypted credential (supports legacy v0 and v1 Envelope Encryption).
  *
- * @param payload - The encrypted payload (value, IV, authTag)
+ * @param payload - The encrypted payload (value, IV, authTag, encryptedDek)
  * @param userId - The user ID (must match the userId used during encryption)
  * @returns The decrypted plaintext credential value
  */
@@ -96,10 +117,32 @@ export function decryptCredential(
   const iv = Buffer.from(payload.iv, "base64");
   const authTag = Buffer.from(payload.authTag, "base64");
 
-  // Derive the same key using the same IV as salt
-  const key = deriveKey(masterKey, iv);
+  let dek: Buffer;
 
-  const decipher = createDecipheriv(ALGORITHM, key, iv, {
+  if (payload.encryptedDek) {
+    // v1 Envelope Encryption
+    const parts = payload.encryptedDek.split(':');
+    if (parts.length !== 3) {
+      throw new Error("Invalid encryptedDek format");
+    }
+    const dekIv = Buffer.from(parts[0], "base64");
+    const dekAuthTag = Buffer.from(parts[1], "base64");
+    const kek = deriveKey(masterKey, dekIv);
+    
+    const dekDecipher = createDecipheriv(ALGORITHM, kek, dekIv, {
+      authTagLength: AUTH_TAG_LENGTH,
+    });
+    dekDecipher.setAAD(Buffer.from(userId, "utf8"));
+    dekDecipher.setAuthTag(dekAuthTag);
+    
+    dek = dekDecipher.update(parts[2], "base64");
+    dek = Buffer.concat([dek, dekDecipher.final()]);
+  } else {
+    // Legacy v0 fallback
+    dek = deriveKey(masterKey, iv);
+  }
+
+  const decipher = createDecipheriv(ALGORITHM, dek, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });
 

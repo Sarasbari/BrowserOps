@@ -66,6 +66,8 @@ export async function PATCH(req: Request, { params }: Params) {
     updateData.encryptedValue = encrypted.encryptedValue;
     updateData.iv = encrypted.iv;
     updateData.authTag = encrypted.authTag;
+    updateData.encryptedDek = encrypted.encryptedDek;
+    updateData.version = encrypted.version;
   }
 
   const credential = await prisma.credential.update({
@@ -122,6 +124,7 @@ export async function _getDecryptedValue(
       encryptedValue: credential.encryptedValue,
       iv: credential.iv,
       authTag: credential.authTag,
+      encryptedDek: credential.encryptedDek,
     },
     userId
   );
