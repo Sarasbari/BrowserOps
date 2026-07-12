@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "worker": "npx tsx src/workers/workflow-worker.ts",
@@ -26,6 +26,7 @@
     "prisma": "^6.0.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "swr": "^2.4.2",
     "uuid": "^14.0.1",
     "zod": "^4.4.3"
   },

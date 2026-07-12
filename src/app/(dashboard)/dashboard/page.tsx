@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import useSWR from "swr";
 import { TopBar } from "@/components/layout/TopBar";
 import {
   GlassCard,
@@ -24,63 +25,51 @@ import {
   TrendingUp,
   Activity,
   Hand,
+  Loader2,
 } from "lucide-react";
 import type { RunStatus } from "@/lib/design-tokens";
-
-// ── Mock Data ──
-const recentRuns = [
-  {
-    id: "run-1",
-    workflow: "Download Shopify Report",
-    status: "completed" as RunStatus,
-    duration: "2m 14s",
-    time: "12 min ago",
-    selfHealed: false,
-  },
-  {
-    id: "run-2",
-    workflow: "Update Inventory Prices",
-    status: "failed" as RunStatus,
-    duration: "0m 47s",
-    time: "38 min ago",
-    selfHealed: false,
-  },
-  {
-    id: "run-3",
-    workflow: "Scrape Competitor Pricing",
-    status: "completed" as RunStatus,
-    duration: "5m 02s",
-    time: "1h ago",
-    selfHealed: true,
-  },
-  {
-    id: "run-4",
-    workflow: "Submit Weekly Report",
-    status: "running" as RunStatus,
-    duration: "1m 23s",
-    time: "Just now",
-    selfHealed: false,
-  },
-  {
-    id: "run-5",
-    workflow: "Export CRM Contacts",
-    status: "paused" as RunStatus,
-    duration: "3m 41s",
-    time: "5 min ago",
-    selfHealed: false,
-  },
-];
-
-const stats = {
-  totalRuns: 847,
-  successRate: 94.2,
-  selfHealRate: 73,
-  activeWorkflows: 12,
-  browserMinutes: { used: 342, total: 500 },
-  storageUsed: { used: 2.1, total: 5 },
-};
+import { fetchStats } from "@/lib/api-client";
+import { formatRelativeTime, formatDuration } from "@/lib/utils";
+import Link from "next/link";
 
 export default function DashboardPage() {
+  const { data, error, isLoading } = useSWR("/api/stats", fetchStats, {
+    refreshInterval: 10000, // Refresh every 10 seconds
+  });
+
+  if (error) {
+    return (
+      <>
+        <TopBar title="Command Center" subtitle="Real-time automation overview" />
+        <div className="flex-1 p-6 flex items-center justify-center">
+          <div className="text-center space-y-4">
+            <AlertTriangle className="h-12 w-12 text-[var(--status-error)] mx-auto opacity-80" />
+            <p className="text-[var(--status-error)]">Failed to load dashboard stats.</p>
+            <p className="text-sm text-[var(--text-muted)]">{error.message}</p>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (isLoading || !data) {
+    return (
+      <>
+        <TopBar title="Command Center" subtitle="Real-time automation overview" />
+        <div className="flex-1 p-6 flex items-center justify-center">
+          <Loader2 className="h-8 w-8 text-[var(--gold)] animate-spin" />
+        </div>
+      </>
+    );
+  }
+
+  const activeRuns = data.runs.byStatus["RUNNING"] || 0;
+  const pausedRuns = data.runs.byStatus["PAUSED"] || 0;
+  
+  // Storage logic isn't fully implemented in the backend yet, default to 0
+  const storageUsed = 0; 
+  const storageTotal = 5;
+
   return (
     <>
       <TopBar title="Command Center" subtitle="Real-time automation overview" />
@@ -89,20 +78,22 @@ export default function DashboardPage() {
         <BentoGrid columns={3}>
           {/* ── Hero: Active Bot Visualization ── */}
           <BentoItem colSpan={2}>
-            <GlassCard className="p-6 h-full min-h-[280px]" glow="cyan" hover={false}>
+            <GlassCard className="p-6 h-full min-h-[280px]" glow={activeRuns > 0 ? "cyan" : "none"} hover={false}>
               <div className="flex items-start justify-between mb-6">
                 <div>
                   <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-1">
                     Automation Engine
                   </h2>
                   <p className="text-sm text-[var(--text-muted)]">
-                    {stats.activeWorkflows} active workflows • {stats.totalRuns} total runs
+                    {data.workflows.active} active workflows • {data.runs.total} total runs
                   </p>
                 </div>
-                <CyanBadge>
-                  <Activity className="h-3 w-3" />
-                  LIVE
-                </CyanBadge>
+                {activeRuns > 0 && (
+                  <CyanBadge>
+                    <Activity className="h-3 w-3" />
+                    LIVE
+                  </CyanBadge>
+                )}
               </div>
 
               {/* Animated bot visualization */}
@@ -121,23 +112,25 @@ export default function DashboardPage() {
                 {/* Central bot icon */}
                 <div className="relative z-10 flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-[var(--gold-dim)] to-[var(--gold)] shadow-xl animate-float">
                   <Bot className="h-10 w-10 text-[var(--obsidian)]" />
-                  <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[var(--cyan)] border-2 border-[var(--obsidian)] flex items-center justify-center">
-                    <Zap className="h-2.5 w-2.5 text-[var(--obsidian)]" />
-                  </div>
+                  {data.selfHealing.healed > 0 && (
+                    <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[var(--cyan)] border-2 border-[var(--obsidian)] flex items-center justify-center">
+                      <Zap className="h-2.5 w-2.5 text-[var(--obsidian)]" />
+                    </div>
+                  )}
                 </div>
 
                 {/* Throughput stats */}
                 <div className="absolute bottom-0 left-0 right-0 flex justify-between px-4">
                   <div className="text-center">
-                    <p className="text-2xl font-mono font-bold text-[var(--cyan)]">4</p>
+                    <p className="text-2xl font-mono font-bold text-[var(--cyan)]">{activeRuns}</p>
                     <p className="text-[10px] text-[var(--text-muted)]">Running</p>
                   </div>
                   <div className="text-center">
-                    <p className="text-2xl font-mono font-bold text-[var(--gold)]">1</p>
+                    <p className="text-2xl font-mono font-bold text-[var(--gold)]">{pausedRuns}</p>
                     <p className="text-[10px] text-[var(--text-muted)]">Awaiting HITL</p>
                   </div>
                   <div className="text-center">
-                    <p className="text-2xl font-mono font-bold text-[var(--status-success)]">847</p>
+                    <p className="text-2xl font-mono font-bold text-[var(--status-success)]">{data.runs.total}</p>
                     <p className="text-[10px] text-[var(--text-muted)]">Total Runs</p>
                   </div>
                 </div>
@@ -149,7 +142,7 @@ export default function DashboardPage() {
           <BentoItem>
             <GlassCard
               className="p-5 h-full min-h-[280px] flex flex-col"
-              glow="gold"
+              glow={pausedRuns > 0 ? "gold" : "none"}
               hover={true}
             >
               <div className="flex items-center gap-2 mb-4">
@@ -161,40 +154,46 @@ export default function DashboardPage() {
                     Human Intervention
                   </h3>
                   <p className="text-[10px] text-[var(--text-muted)]">
-                    1 workflow needs your attention
+                    {pausedRuns === 0 ? "No workflows need attention" : `${pausedRuns} workflow${pausedRuns !== 1 ? 's' : ''} need${pausedRuns === 1 ? 's' : ''} your attention`}
                   </p>
                 </div>
               </div>
 
               <div className="flex-1 flex flex-col gap-3">
-                {/* Active HITL request */}
-                <div className="p-3 rounded-lg bg-[var(--gold-subtle)] border border-[var(--gold)]/20 animate-pulse-gold">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-medium text-[var(--gold)]">
-                      Export CRM Contacts
-                    </span>
-                    <StatusBadge status="paused" size="sm" />
+                {pausedRuns > 0 ? (
+                  <div className="p-3 rounded-lg bg-[var(--gold-subtle)] border border-[var(--gold)]/20 animate-pulse-gold">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-[var(--gold)]">
+                        Active Intervention
+                      </span>
+                      <StatusBadge status="paused" size="sm" />
+                    </div>
+                    <p className="text-[11px] text-[var(--text-muted)] mb-3">
+                      A workflow requires manual resolution to continue.
+                    </p>
+                    <Link href="/runs" className="block w-full">
+                      <GoldButton size="sm" className="w-full">
+                        <Eye className="h-3 w-3" />
+                        Take Over
+                      </GoldButton>
+                    </Link>
                   </div>
-                  <p className="text-[11px] text-[var(--text-muted)] mb-3">
-                    CAPTCHA detected on login page. Manual resolution required.
-                  </p>
-                  <GoldButton size="sm" className="w-full">
-                    <Eye className="h-3 w-3" />
-                    Take Over
-                  </GoldButton>
-                </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center flex-1 text-center py-6">
+                    <CheckCircle2 className="h-8 w-8 text-[var(--status-success)] mb-3 opacity-80" />
+                    <p className="text-xs text-[var(--text-muted)]">All workflows are running smoothly automatically.</p>
+                  </div>
+                )}
 
-                {/* Recent HITL history */}
-                <div className="text-xs text-[var(--text-muted)] space-y-1.5 mt-auto">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="h-3 w-3 text-[var(--status-success)]" />
-                    <span>2FA resolved — 22 min ago</span>
+                {/* Recent HITL history - currently mocking this specific part since we don't have HITL resolution history in DB yet */}
+                {pausedRuns > 0 && (
+                  <div className="text-xs text-[var(--text-muted)] space-y-1.5 mt-auto">
+                    <div className="flex items-center gap-2">
+                      <Clock className="h-3 w-3 text-[var(--text-muted)]" />
+                      <span>Check the runs page for details.</span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="h-3 w-3 text-[var(--status-success)]" />
-                    <span>Pop-up dismissed — 1h ago</span>
-                  </div>
-                </div>
+                )}
               </div>
             </GlassCard>
           </BentoItem>
@@ -208,7 +207,7 @@ export default function DashboardPage() {
                 </div>
                 <div>
                   <p className="text-2xl font-mono font-bold text-[var(--text-primary)]">
-                    {stats.successRate}%
+                    {data.runs.successRate}%
                   </p>
                   <p className="text-xs text-[var(--text-muted)]">
                     Success Rate
@@ -217,7 +216,7 @@ export default function DashboardPage() {
               </div>
               <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
                 <Zap className="h-3 w-3 text-[var(--status-healed)]" />
-                <span>{stats.selfHealRate}% self-heal rate</span>
+                <span>{data.selfHealing.rate}% self-heal rate</span>
               </div>
             </GlassCard>
           </BentoItem>
@@ -225,10 +224,10 @@ export default function DashboardPage() {
           <BentoItem>
             <GlassCard className="p-5 h-full flex items-center justify-center">
               <CircularGauge
-                value={stats.browserMinutes.used}
-                max={stats.browserMinutes.total}
+                value={data.usage.browserMinutes}
+                max={500}
                 label="Browser Minutes"
-                sublabel={`${stats.browserMinutes.used} / ${stats.browserMinutes.total} min`}
+                sublabel={`${data.usage.browserMinutes} / 500 min`}
                 color="gold"
                 size={110}
               />
@@ -238,10 +237,10 @@ export default function DashboardPage() {
           <BentoItem>
             <GlassCard className="p-5 h-full flex items-center justify-center">
               <CircularGauge
-                value={stats.storageUsed.used}
-                max={stats.storageUsed.total}
+                value={storageUsed}
+                max={storageTotal}
                 label="Storage Used"
-                sublabel={`${stats.storageUsed.used} / ${stats.storageUsed.total} GB`}
+                sublabel={`${storageUsed} / ${storageTotal} GB`}
                 color="cyan"
                 size={110}
               />
@@ -255,66 +254,70 @@ export default function DashboardPage() {
                 <h3 className="text-sm font-semibold text-[var(--text-primary)]">
                   Recent Runs
                 </h3>
-                <GoldButton variant="ghost" size="sm">
-                  View All
-                </GoldButton>
+                <Link href="/runs">
+                  <GoldButton variant="ghost" size="sm">
+                    View All
+                  </GoldButton>
+                </Link>
               </div>
 
-              <div className="space-y-2">
-                {recentRuns.map((run) => (
-                  <div
-                    key={run.id}
-                    className="flex items-center gap-3 p-3 rounded-lg bg-[var(--obsidian-surface)]/50 hover:bg-[var(--obsidian-elevated)] transition-colors duration-200 cursor-pointer group"
-                  >
-                    {/* Status icon */}
-                    <div className="flex-shrink-0">
-                      {run.status === "completed" && (
-                        <CheckCircle2 className="h-4 w-4 text-[var(--status-success)]" />
-                      )}
-                      {run.status === "failed" && (
-                        <XCircle className="h-4 w-4 text-[var(--status-error)]" />
-                      )}
-                      {run.status === "running" && (
-                        <Play className="h-4 w-4 text-[var(--cyan)]" />
-                      )}
-                      {run.status === "paused" && (
-                        <AlertTriangle className="h-4 w-4 text-[var(--gold)]" />
-                      )}
-                    </div>
+              {data.runs.recent.length === 0 ? (
+                <div className="text-center py-6">
+                  <p className="text-sm text-[var(--text-muted)]">No runs yet.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {data.runs.recent.map((run) => (
+                    <Link
+                      href={`/runs/${run.id}`}
+                      key={run.id}
+                      className="flex items-center gap-3 p-3 rounded-lg bg-[var(--obsidian-surface)]/50 hover:bg-[var(--obsidian-elevated)] transition-colors duration-200 cursor-pointer group"
+                    >
+                      {/* Status icon */}
+                      <div className="flex-shrink-0">
+                        {run.status === "COMPLETED" && (
+                          <CheckCircle2 className="h-4 w-4 text-[var(--status-success)]" />
+                        )}
+                        {run.status === "FAILED" && (
+                          <XCircle className="h-4 w-4 text-[var(--status-error)]" />
+                        )}
+                        {(run.status === "RUNNING" || run.status === "QUEUED") && (
+                          <Play className="h-4 w-4 text-[var(--cyan)]" />
+                        )}
+                        {run.status === "PAUSED" && (
+                          <AlertTriangle className="h-4 w-4 text-[var(--gold)]" />
+                        )}
+                        {run.status === "CANCELLED" && (
+                          <XCircle className="h-4 w-4 text-[var(--text-muted)]" />
+                        )}
+                      </div>
 
-                    {/* Workflow name */}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-[var(--text-primary)] truncate">
-                        {run.workflow}
-                      </p>
-                      <p className="text-[11px] text-[var(--text-muted)]">
-                        {run.time}
-                      </p>
-                    </div>
+                      {/* Workflow name */}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-[var(--text-primary)] truncate">
+                          {run.version.workflow.name}
+                        </p>
+                        <p className="text-[11px] text-[var(--text-muted)]">
+                          {formatRelativeTime(run.createdAt)}
+                        </p>
+                      </div>
 
-                    {/* Self-healed badge */}
-                    {run.selfHealed && (
-                      <CyanBadge>
-                        <Zap className="h-2.5 w-2.5" />
-                        Self-healed
-                      </CyanBadge>
-                    )}
+                      {/* Status + Duration */}
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <span className="text-xs font-mono text-[var(--text-muted)]">
+                          {formatDuration(run.durationMs)}
+                        </span>
+                        <StatusBadge status={run.status.toLowerCase() as RunStatus} size="sm" />
+                      </div>
 
-                    {/* Status + Duration */}
-                    <div className="flex items-center gap-3 flex-shrink-0">
-                      <span className="text-xs font-mono text-[var(--text-muted)]">
-                        {run.duration}
-                      </span>
-                      <StatusBadge status={run.status} size="sm" />
-                    </div>
-
-                    {/* Replay button */}
-                    <button className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-[var(--obsidian-border)] text-[var(--text-muted)] hover:text-[var(--cyan)]">
-                      <Eye className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+                      {/* Replay button */}
+                      <button className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-[var(--obsidian-border)] text-[var(--text-muted)] hover:text-[var(--cyan)]">
+                        <Eye className="h-3.5 w-3.5" />
+                      </button>
+                    </Link>
+                  ))}
+                </div>
+              )}
             </GlassCard>
           </BentoItem>
 
@@ -325,26 +328,32 @@ export default function DashboardPage() {
                 Quick Actions
               </h3>
               <div className="space-y-2">
-                <GoldButton className="w-full justify-start" size="md">
-                  <GitBranch className="h-4 w-4" />
-                  New Workflow
-                </GoldButton>
-                <GoldButton
-                  variant="secondary"
-                  className="w-full justify-start"
-                  size="md"
-                >
-                  <Play className="h-4 w-4" />
-                  Run Workflow
-                </GoldButton>
-                <GoldButton
-                  variant="ghost"
-                  className="w-full justify-start"
-                  size="md"
-                >
-                  <Clock className="h-4 w-4" />
-                  New Schedule
-                </GoldButton>
+                <Link href="/workflows/new/builder" className="block w-full">
+                  <GoldButton className="w-full justify-start" size="md">
+                    <GitBranch className="h-4 w-4" />
+                    New Workflow
+                  </GoldButton>
+                </Link>
+                <Link href="/workflows" className="block w-full">
+                  <GoldButton
+                    variant="secondary"
+                    className="w-full justify-start"
+                    size="md"
+                  >
+                    <Play className="h-4 w-4" />
+                    Run Workflow
+                  </GoldButton>
+                </Link>
+                <Link href="/schedules" className="block w-full">
+                  <GoldButton
+                    variant="ghost"
+                    className="w-full justify-start"
+                    size="md"
+                  >
+                    <Clock className="h-4 w-4" />
+                    New Schedule
+                  </GoldButton>
+                </Link>
               </div>
             </GlassCard>
           </BentoItem>

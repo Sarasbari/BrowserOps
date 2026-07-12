@@ -22,7 +22,7 @@ import { TopBar } from "@/components/layout/TopBar";
 import { StepNode } from "@/components/builder/StepNode";
 import { StepPalette } from "@/components/builder/StepPalette";
 import { GoldButton } from "@/components/ui";
-import { Save, Upload, Play, Undo2, Redo2, Loader2 } from "lucide-react";
+import { Save, Upload, Play, Undo2, Redo2, Loader2, AlertCircle } from "lucide-react";
 import type { StepType } from "@/lib/design-tokens";
 
 // ── Edge styling ──
@@ -129,6 +129,17 @@ export default function WorkflowBuilderPage() {
   const [versionNum, setVersionNum] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
 
+  // Track saved state to determine if there are unsaved changes
+  const [savedStepsStr, setSavedStepsStr] = useState<string>("[]");
+
+  const currentStepsStr = useMemo(() => {
+    // avoid calling serialize on every tiny pan/zoom, but for now we do it
+    // because data doesn't change on pan/zoom, just the nodes state might
+    return JSON.stringify(serializeCanvas(nodes, edges));
+  }, [nodes, edges]);
+
+  const hasUnsavedChanges = currentStepsStr !== savedStepsStr;
+
   // ── Show toast ──
   const showToast = useCallback((message: string, type: ToastType) => {
     setToast({ message, type });
@@ -141,6 +152,19 @@ export default function WorkflowBuilderPage() {
     () => ({ stepNode: StepNode }),
     []
   );
+
+  // ── Beforeunload warning ──
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   // ── Load workflow data ──
   useEffect(() => {
@@ -177,6 +201,9 @@ export default function WorkflowBuilderPage() {
           const { nodes: loadedNodes, edges: loadedEdges } = deserializeSteps(steps);
           setNodes(loadedNodes);
           setEdges(loadedEdges);
+          setSavedStepsStr(JSON.stringify(steps)); // set initial saved state
+        } else {
+          setSavedStepsStr(JSON.stringify([]));
         }
       } catch (err) {
         showToast(err instanceof Error ? err.message : "Failed to load workflow", "error");
@@ -263,6 +290,7 @@ export default function WorkflowBuilderPage() {
         throw new Error(error || "Failed to save draft");
       }
 
+      setSavedStepsStr(JSON.stringify(steps)); // update saved state
       showToast("Draft saved", "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Save failed", "error");
@@ -296,6 +324,7 @@ export default function WorkflowBuilderPage() {
       const { version } = await res.json();
       setVersionNum(version.version);
       setWorkflowStatus("PUBLISHED");
+      setSavedStepsStr(JSON.stringify(steps)); // publishing saves it
       showToast(`Published v${version.version}`, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Publish failed", "error");
@@ -318,6 +347,7 @@ export default function WorkflowBuilderPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ draftSteps: steps }),
       });
+      setSavedStepsStr(JSON.stringify(steps));
 
       // Trigger run with testRun flag
       const res = await fetch("/api/runs", {
@@ -355,7 +385,16 @@ export default function WorkflowBuilderPage() {
     <>
       <TopBar
         title="Workflow Architect"
-        subtitle={`${workflowName || "Untitled"} — ${workflowStatus} v${versionNum || "draft"}`}
+        subtitle={
+          <span className="flex items-center gap-2">
+            <span>{workflowName || "Untitled"} — {workflowStatus} v{versionNum || "draft"}</span>
+            {hasUnsavedChanges && (
+              <span className="flex items-center gap-1 text-[var(--status-warning)] text-xs">
+                <AlertCircle className="h-3 w-3" /> Unsaved changes
+              </span>
+            )}
+          </span>
+        }
       />
 
       <div className="flex-1 relative">
@@ -411,8 +450,12 @@ export default function WorkflowBuilderPage() {
                 variant="secondary"
                 size="sm"
                 onClick={handleSaveDraft}
-                disabled={saving}
+                disabled={saving || !hasUnsavedChanges}
+                className={hasUnsavedChanges ? "relative" : ""}
               >
+                {hasUnsavedChanges && (
+                  <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-[var(--status-warning)] border border-[var(--obsidian-surface)] animate-pulse" />
+                )}
                 {saving ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
