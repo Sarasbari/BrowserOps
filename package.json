@@ -16,6 +16,7 @@
     "@aws-sdk/client-s3": "^3.1085.0",
     "@aws-sdk/s3-request-presigner": "^3.1085.0",
     "@clerk/nextjs": "^7.5.16",
+    "@next/swc-win32-x64-msvc": "^16.2.11",
     "@prisma/client": "^6.0.0",
     "@types/ws": "^8.18.1",
     "@xyflow/react": "^12.11.2",

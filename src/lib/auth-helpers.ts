@@ -1,4 +1,4 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "./prisma";
 import { NextResponse } from "next/server";
 import { WorkspaceRole } from "@prisma/client";
@@ -10,7 +10,7 @@ export interface AuthContext {
 
 /**
  * Authenticate and resolve the Clerk user to a DB user.
- * Expects the DB user to exist (synced via Webhooks).
+ * Auto-provisions the DB user if not present (e.g. in dev without webhooks).
  */
 export async function requireAuth(): Promise<AuthContext | NextResponse> {
   const { userId } = await auth();
@@ -19,12 +19,30 @@ export async function requireAuth(): Promise<AuthContext | NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const dbUser = await prisma.user.findUnique({
+  let dbUser = await prisma.user.findUnique({
     where: { clerkId: userId },
   });
 
   if (!dbUser) {
-    return NextResponse.json({ error: "User account is not fully synced yet. Please try again in a moment." }, { status: 401 });
+    const clerkUser = await currentUser();
+    const email = clerkUser?.emailAddresses?.[0]?.emailAddress || `${userId}@placeholder.com`;
+    const name = clerkUser ? [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") : null;
+    const avatarUrl = clerkUser?.imageUrl || null;
+
+    dbUser = await prisma.user.upsert({
+      where: { clerkId: userId },
+      update: {
+        email,
+        name: name || null,
+        avatarUrl: avatarUrl || null,
+      },
+      create: {
+        clerkId: userId,
+        email,
+        name: name || null,
+        avatarUrl: avatarUrl || null,
+      },
+    });
   }
 
   return { userId, dbUserId: dbUser.id };
