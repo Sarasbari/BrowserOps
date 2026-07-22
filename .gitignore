@@ -47,3 +47,18 @@ docs/*
 
 # clerk configuration (can include secrets)
 /.clerk/
+
+# October desktop — local canvas state
+.october/
+
+# October (generated — context bus / browser MCP)
+.claude/
+.mcp.json
+.codex/
+.opencode/
+opencode.json
+.cursor/
+.gemini/
+
+/website-cloner/
+/.grok/
